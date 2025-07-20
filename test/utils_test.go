@@ -158,6 +158,41 @@ type JSONInstruction struct {
 	Confidence float64 `json:"Confidence"`
 }
 
+// parseLineNumber parses a line number specification, supporting both absolute numbers
+// and relative expressions like [+1] or [-1].
+func parseLineNumber(lns string, currentLine int) (int, error) {
+	if after, ok := strings.CutPrefix(lns, "["); ok {
+		// Extract expression: [+1] -> "+1", [-3] -> "-3"
+		after := strings.TrimSuffix(after, "]")
+
+		if after == "" {
+			return 0, fmt.Errorf("empty offset in %q", lns)
+		}
+
+		var offset int
+		var err error
+
+		switch after[0] {
+		case '+':
+			offset, err = strconv.Atoi(after[1:])
+		case '-':
+			offset, err = strconv.Atoi(after[1:])
+			offset = -offset
+		default:
+			return 0, fmt.Errorf("unsupported operator in %q", lns)
+		}
+
+		if err != nil {
+			return 0, fmt.Errorf("invalid offset in %q: %v", lns, err)
+		}
+
+		return currentLine + offset, nil
+	}
+
+	// Fallback to current behavior
+	return strconv.Atoi(lns)
+}
+
 // parseInstructions parses instructions from the comments in a Go source file.
 // It returns nil if none were parsed.
 func parseInstructions(t *testing.T, filename string, src []byte) []instruction {
@@ -198,7 +233,7 @@ func parseInstructions(t *testing.T, filename string, src []byte) []instruction 
 					// This is a match for a different line.
 					lns := strings.TrimPrefix(line[i:], "MATCH:")
 					lns = lns[:strings.Index(lns, " ")] //nolint:gocritic // offBy1: false positive
-					matchLine, err = strconv.Atoi(lns)
+					matchLine, err = parseLineNumber(lns, ln)
 					if err != nil {
 						t.Fatalf("Bad match line number %q at %v:%d: %v", lns, filename, ln, err)
 					}
@@ -243,6 +278,43 @@ func extractDataMode(line string) string {
 	}
 
 	return ""
+}
+
+func TestParseLineNumber(t *testing.T) {
+	tests := []struct {
+		input       string
+		currentLine int
+		expected    int
+		expectError bool
+	}{
+		{"42", 10, 42, false},    // absolute line number
+		{"[+1]", 10, 11, false},  // next line
+		{"[-1]", 10, 9, false},   // previous line
+		{"[+5]", 20, 25, false},  // 5 lines forward
+		{"[-3]", 20, 17, false},  // 3 lines back
+		{"[*2]", 10, 0, true},    // unsupported operator
+		{"[+abc]", 10, 0, true},  // invalid offset
+		{"[+]", 10, 0, true},     // missing offset
+		{"[]", 10, 0, true},      // empty brackets
+		{"[1]", 10, 0, true},     // missing operator
+		{"invalid", 10, 0, true}, // completely invalid
+	}
+
+	for _, test := range tests {
+		result, err := parseLineNumber(test.input, test.currentLine)
+
+		if test.expectError {
+			if err == nil {
+				t.Errorf("parseLineNumber(%q, %d): expected error but got nil", test.input, test.currentLine)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("parseLineNumber(%q, %d): unexpected error: %v", test.input, test.currentLine, err)
+			} else if result != test.expected {
+				t.Errorf("parseLineNumber(%q, %d): expected %d, got %d", test.input, test.currentLine, test.expected, result)
+			}
+		}
+	}
 }
 
 func extractPattern(line string) (string, error) {
